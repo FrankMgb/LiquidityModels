@@ -1,76 +1,194 @@
-import datetime
-import pytz
+import whenever
+import pandas as pd # Keep for initial flexible string parsing
+from datetime import datetime as std_datetime, date as std_date, timezone as std_timezone # For type hints and conversion from pandas
 
-def convert_to_et(dt_object, original_tz_str=None):
+# Define the target timezone string
+TARGET_TZ = "America/New_York"
+
+def convert_to_et(timestamp_input: any, original_tz_str: str | None = None) -> whenever.ZonedDateTime | None:
     """
-    Converts a datetime object to 'America/New_York' (ET).
+    Converts a given timestamp input to a whenever.ZonedDateTime in 'America/New_York' (ET).
 
     Args:
-        dt_object (datetime.datetime): The datetime object to convert.
-                                      Can be naive or timezone-aware.
+        timestamp_input: The timestamp to convert. Can be:
+            - whenever.Instant
+            - whenever.ZonedDateTime
+            - whenever.PlainDateTime
+            - Python datetime.datetime
+            - int/float (Unix timestamp in seconds)
+            - str (various formats, including ISO8601 or common datetime strings)
         original_tz_str (str, optional): The timezone string (e.g., 'UTC', 'Europe/London')
-                                         if dt_object is naive. Defaults to None.
+                                         to assume if timestamp_input is a naive Python datetime
+                                         or a plain string without timezone info.
+                                         If None for naive inputs, ambiguity cannot be resolved.
 
     Returns:
-        datetime.datetime: A timezone-aware datetime object in ET.
-                           Returns None if conversion is not possible.
+        whenever.ZonedDateTime: A timezone-aware datetime object in ET.
+                                Returns None if conversion is not possible or input is invalid.
+                                Raises whenever.SkippedTime or whenever.RepeatedTime if a PlainDateTime
+                                with original_tz_str results in a non-existent or ambiguous time
+                                and 'raise' is the effective disambiguation strategy.
     """
-    et_tz = pytz.timezone('America/New_York')
+    try:
+        # 1. Handle whenever native types
+        if isinstance(timestamp_input, whenever.Instant):
+            return timestamp_input.to_tz(TARGET_TZ)
+        if isinstance(timestamp_input, whenever.ZonedDateTime):
+            if timestamp_input.tz == TARGET_TZ:
+                return timestamp_input
+            return timestamp_input.to_tz(TARGET_TZ)
+        if isinstance(timestamp_input, whenever.PlainDateTime):
+            if not original_tz_str:
+                print(f"Error: whenever.PlainDateTime provided without original_tz_str. Ambiguous conversion for {timestamp_input}.")
+                return None
+            # This will raise SkippedTime or RepeatedTime if ambiguous and disambiguate='raise' (default for assume_tz)
+            # For our purpose, we want to know if the original_tz makes it invalid, so 'raise' is good.
+            return timestamp_input.assume_tz(original_tz_str, disambiguate='raise').to_tz(TARGET_TZ)
 
-    if dt_object.tzinfo is None:
-        if original_tz_str:
-            try:
-                original_tz = pytz.timezone(original_tz_str)
-                # Explicitly use is_dst=None to ensure pytz raises NonExistentTimeError or AmbiguousTimeError
-                # as per documentation, instead of possibly auto-resolving.
-                dt_object = original_tz.localize(dt_object, is_dst=None)
-            except pytz.UnknownTimeZoneError:
-                # Handle unknown timezone string if necessary
-                print(f"Error: Unknown original timezone string: {original_tz_str}")
-                return None
-            except pytz.exceptions.NonExistentTimeError as e:
-                print(f"Error: Naive datetime {dt_object} is non-existent in {original_tz_str} due to DST: {e}")
-                return None
-            except pytz.exceptions.AmbiguousTimeError as e:
-                # For ambiguous times, pytz.localize with is_dst=None resolves it by picking one.
-                # This is often the desired behavior (e.g., system default or first occurrence).
-                print(f"Warning: Naive datetime {dt_object} is ambiguous in {original_tz_str} due to DST. Attempting to resolve by choosing standard time (is_dst=False). Error: {e}")
-                try:
-                    # Resolve ambiguity by explicitly choosing one representation (e.g., standard time)
-                    dt_object = original_tz.localize(dt_object, is_dst=False)
-                except Exception as final_e:
-                    print(f"Could not resolve ambiguous time for {dt_object} in {original_tz_str} even after choosing is_dst=False: {final_e}")
+        # 2. Handle Python datetime.datetime
+        if isinstance(timestamp_input, std_datetime):
+            py_dt = timestamp_input
+            if py_dt.tzinfo is None: # Naive Python datetime
+                if not original_tz_str:
+                    print(f"Error: Naive Python datetime provided without original_tz_str. Ambiguous conversion for {py_dt}.")
                     return None
-            # No other exceptions expected here if the above are comprehensive for localization issues.
+                plain_dt = whenever.PlainDateTime.from_py_datetime(py_dt)
+                # This will use disambiguate='raise' by default if not specified,
+                # or we can be explicit. 'raise' helps identify invalid naive times.
+                return plain_dt.assume_tz(original_tz_str, disambiguate='raise').to_tz(TARGET_TZ)
+            else: # Aware Python datetime
+                # Convert aware Python datetime to whenever.Instant first, then to ZonedDateTime
+                # Note: whenever.Instant.from_py_datetime expects UTC or raises error if tz is not ZoneInfo UTC.
+                # A more general path for aware py_dt is to convert to its UTC equivalent instant.
+                # If it has ZoneInfo, ZonedDateTime.from_py_datetime(py_dt).to_tz(TARGET_TZ) is better.
+                if isinstance(py_dt.tzinfo, type(std_timezone.utc)): # Check if it's stdlib UTC
+                     instant = whenever.Instant.from_py_datetime(py_dt)
+                     return instant.to_tz(TARGET_TZ)
+                try:
+                    # Attempt to convert directly if tzinfo is ZoneInfo (used by whenever)
+                    # This requires py_dt.tzinfo to be a zoneinfo.ZoneInfo object.
+                    # If pandas parsed a string with tz, it might be zoneinfo.
+                    zdt = whenever.ZonedDateTime.from_py_datetime(py_dt)
+                    return zdt.to_tz(TARGET_TZ)
+                except ValueError: # Likely if tzinfo is not what whenever expects (e.g. pytz)
+                    # Fallback: convert to UTC instant then to target TZ
+                    utc_py_dt = py_dt.astimezone(std_timezone.utc)
+                    instant = whenever.Instant.from_py_datetime(utc_py_dt)
+                    return instant.to_tz(TARGET_TZ)
 
-        else:
-            # If dt_object is naive and no original_tz_str is provided,
-            # we cannot reliably convert it. It's ambiguous.
-            # Depending on policy, one might assume UTC or local system time,
-            # but it's safer to require clarification.
-            print("Error: Naive datetime provided without an original_tz_str. Conversion is ambiguous.")
-            return None
 
-    # If already timezone-aware, or localized above, convert to ET
-    return dt_object.astimezone(et_tz)
+        # 3. Handle Unix timestamp (int/float)
+        if isinstance(timestamp_input, (int, float)):
+            return whenever.Instant.from_timestamp(int(timestamp_input)).to_tz(TARGET_TZ)
 
-def get_market_open_close_et(date_obj, open_time_str="09:30", close_time_str="16:00"):
+        # 4. Handle string inputs
+        if isinstance(timestamp_input, str):
+            s = timestamp_input
+            # Attempt 1: Direct ISO parsing by whenever (for UTC or fixed offset strings)
+            try:
+                # Heuristic: Check if it looks like an ISO string with offset/Z
+                # A more robust check might involve trying both parsers if one fails.
+                if 'Z' in s or '+' in s or (s.count('-') >= 3 and s[10:].count('-') > 0 and s[10:].startswith("-")): # crude check for offset like -04:00
+                    # Try OffsetDateTime first as it's more specific for offsets than Instant's ISO
+                    try:
+                        odt = whenever.OffsetDateTime.parse_common_iso(s)
+                        return odt.to_tz(TARGET_TZ)
+                    except ValueError: # If not OffsetDateTime ISO, try Instant ISO (for Z)
+                        instant = whenever.Instant.parse_common_iso(s)
+                        return instant.to_tz(TARGET_TZ)
+            except ValueError:
+                pass # Fall through if not a direct ISO parse by whenever
+
+            # Attempt 2: Check for "datetime_string Timezone/Name" pattern
+            parts = s.split(" ")
+            potential_tz_name_from_string = None
+            datetime_part_str = s # Default to full string if no TZ part found
+
+            if len(parts) > 1:
+                # Heuristic: last part contains '/' and first component of TZ is not all digits
+                # e.g. "Europe/London" not "10/11" from "10/11/2023"
+                last_part = parts[-1]
+                if "/" in last_part and not last_part.split('/')[0].isdigit():
+                    try:
+                        # Validate if it's a known timezone by trying to use it with a dummy date
+                        # This is a bit heavy but ensures it's a valid IANA name known to `whenever`
+                        whenever.Date(2000,1,1).at(whenever.Time(0,0)).assume_tz(last_part, disambiguate='raise')
+                        potential_tz_name_from_string = last_part
+                        datetime_part_str = " ".join(parts[:-1])
+                    except (whenever.TimeZoneNotFoundError, ValueError, TypeError):
+                        potential_tz_name_from_string = None # Not a valid TZ name
+
+            # Attempt 3: Use pandas for flexible parsing of the (potentially shortened) datetime_part_str
+            try:
+                # Ensure pandas doesn't try to infer timezone from ambiguous strings like "Europe/London"
+                # by parsing only the datetime_part_str.
+                py_dt_from_pd = pd.to_datetime(datetime_part_str).to_pydatetime()
+
+                # Determine the original_tz for this py_dt_from_pd
+                # Priority: 1. From string split, 2. From function arg, 3. Default for naive strings
+                final_original_tz_for_conversion = original_tz_str # From function args
+                if potential_tz_name_from_string:
+                    final_original_tz_for_conversion = potential_tz_name_from_string
+                elif py_dt_from_pd.tzinfo is None and not final_original_tz_for_conversion:
+                    # If still naive and no TZ info from string or args, assume TARGET_TZ
+                    final_original_tz_for_conversion = TARGET_TZ
+
+                # Now convert py_dt_from_pd using final_original_tz_for_conversion
+                # This recursive call handles the py_datetime object correctly.
+                return convert_to_et(py_dt_from_pd, original_tz_str=final_original_tz_for_conversion)
+
+            except ValueError as e_pd:
+                print(f"Error: Pandas could not parse string timestamp '{datetime_part_str}' (derived from '{s}'): {e_pd}")
+                return None
+            except Exception as e_general_str_parse: # Catch other errors during this string parsing block
+                print(f"Error processing string timestamp '{s}': {e_general_str_parse}")
+                return None
+
+        print(f"Error: Unsupported timestamp input type: {type(timestamp_input)}")
+        return None
+
+    except (whenever.SkippedTime, whenever.RepeatedTime) as e_dst:
+        print(f"Error: DST transition issue for input {timestamp_input} (orig_tz: {original_tz_str}). Time is non-existent or ambiguous: {e_dst}")
+        return None
+    except whenever.TimeZoneNotFoundError as e_tz_not_found:
+        print(f"Error: Timezone not found: {e_tz_not_found}")
+        return None
+    except ValueError as e_val: # Catch other ValueErrors from whenever constructors/methods
+        print(f"Error: Value error during conversion for {timestamp_input}: {e_val}")
+        return None
+    except Exception as e_general: # Catch-all for unexpected issues
+        print(f"An unexpected error occurred converting {timestamp_input}: {e_general}")
+        return None
+
+
+def get_market_open_close_et(
+    date_input: any, # whenever.Date | std_date
+    open_time_str: str = "09:30",
+    close_time_str: str = "16:00"
+) -> tuple[whenever.ZonedDateTime | None, whenever.ZonedDateTime | None]:
     """
-    Calculates the market open and close times in ET for a given date.
+    Calculates the market open and close times as whenever.ZonedDateTime objects in ET.
 
     Args:
-        date_obj (datetime.date): The date for which to calculate market times.
-        open_time_str (str, optional): Market open time "HH:MM". Defaults to "09:30".
-        close_time_str (str, optional): Market close time "HH:MM". Defaults to "16:00".
+        date_input: The date for which to calculate market times.
+                    Can be a whenever.Date or Python datetime.date.
+        open_time_str (str): Market open time "HH:MM". Defaults to "09:30".
+        close_time_str (str): Market close time "HH:MM". Defaults to "16:00".
 
     Returns:
-        tuple(datetime.datetime, datetime.datetime): A tuple containing two timezone-aware
-                                                     datetime objects (ET): (market_open_et, market_close_et).
-                                                     Returns (None, None) if time strings are invalid.
+        tuple(whenever.ZonedDateTime | None, whenever.ZonedDateTime | None):
+            (market_open_et, market_close_et).
+            Returns (None, None) if time strings are invalid or other errors occur.
     """
-    et_tz = pytz.timezone('America/New_York')
-
     try:
+        if isinstance(date_input, std_date) and not isinstance(date_input, std_datetime):
+            w_date = whenever.Date.from_py_date(date_input)
+        elif isinstance(date_input, whenever.Date):
+            w_date = date_input
+        else:
+            print(f"Error: Invalid date_input type: {type(date_input)}. Expected whenever.Date or datetime.date.")
+            return None, None
+
         open_hour, open_minute = map(int, open_time_str.split(':'))
         close_hour, close_minute = map(int, close_time_str.split(':'))
 
@@ -78,132 +196,152 @@ def get_market_open_close_et(date_obj, open_time_str="09:30", close_time_str="16
                 0 <= close_hour <= 23 and 0 <= close_minute <= 59):
             raise ValueError("Hour or minute out of valid range.")
 
-    except ValueError:
-        print(f"Error: Invalid time string format or value. Please use HH:MM with valid ranges. Got: open='{open_time_str}', close='{close_time_str}'")
+        # Construct ZonedDateTime directly.
+        # For typical market hours (9:30, 16:00), 'compatible' or 'raise' are usually fine.
+        # 'raise' is safer to ensure the exact time is valid.
+        # 'compatible' mimics Python's datetime.astimezone behavior during DST transitions.
+        # Let's use 'raise' to be strict.
+        market_open_et = whenever.ZonedDateTime(
+            w_date.year, w_date.month, w_date.day,
+            open_hour, open_minute,
+            tz=TARGET_TZ,
+            disambiguate='raise'
+        )
+        market_close_et = whenever.ZonedDateTime(
+            w_date.year, w_date.month, w_date.day,
+            close_hour, close_minute,
+            tz=TARGET_TZ,
+            disambiguate='raise'
+        )
+        return market_open_et, market_close_et
+
+    except (ValueError, TypeError) as e_parse: # Catches map/split errors, int conversion, out of range
+        print(f"Error parsing time strings or date: '{open_time_str}', '{close_time_str}'. {e_parse}")
+        return None, None
+    except (whenever.SkippedTime, whenever.RepeatedTime) as e_dst:
+        # This would be rare for 9:30/16:00 but good to catch.
+        print(f"Error: DST transition issue for market time on {w_date.format_common_iso()}: {e_dst}")
+        return None, None
+    except whenever.TimeZoneNotFoundError as e_tz_not_found:
+        print(f"Error: Timezone '{TARGET_TZ}' not found: {e_tz_not_found}")
+        return None, None
+    except Exception as e_general:
+        print(f"An unexpected error in get_market_open_close_et: {e_general}")
         return None, None
 
-    # Create naive datetime objects for open and close times
-    market_open_naive = datetime.datetime(date_obj.year, date_obj.month, date_obj.day, open_hour, open_minute)
-    market_close_naive = datetime.datetime(date_obj.year, date_obj.month, date_obj.day, close_hour, close_minute)
-
-    # Localize these naive datetimes to ET
-    # For market times like 9:30 AM or 4:00 PM, DST ambiguity is rare for ET,
-    # as transitions usually happen at 2:00 AM.
-    # However, using localize is the correct way to ensure timezone awareness.
-    try:
-        market_open_et = et_tz.localize(market_open_naive)
-        market_close_et = et_tz.localize(market_close_naive)
-    except (pytz.exceptions.AmbiguousTimeError, pytz.exceptions.NonExistentTimeError) as e:
-        # This should be very rare for typical market open/close times in ET
-        # but handling it defensively.
-        print(f"Warning: DST transition issue for market time on {date_obj}: {e}")
-        # Attempt to normalize if ambiguous (e.g. fall-back)
-        if isinstance(e, pytz.exceptions.AmbiguousTimeError):
-            market_open_et = et_tz.normalize(et_tz.localize(market_open_naive, is_dst=True)) # or is_dst=False
-            market_close_et = et_tz.normalize(et_tz.localize(market_close_naive, is_dst=True))
-        else: # NonExistentTimeError (e.g. spring-forward)
-            # This would mean the chosen HH:MM literally doesn't exist that day.
-            # For 9:30 or 16:00 this is practically impossible in ET.
-            # Could advance time by an hour for spring-forward if it was, e.g. 2:30 AM
-            print(f"Error: Market time {open_time_str} or {close_time_str} is non-existent for {date_obj} in ET.")
-            return None, None
-
-
-    return market_open_et, market_close_et
 
 if __name__ == '__main__':
-    # Example Usage:
+    print("--- whenever time_utils examples ---")
 
-    # --- convert_to_et examples ---
-    print("--- convert_to_et examples ---")
-    # 1. Naive datetime, assuming it's UTC
-    naive_utc_dt = datetime.datetime(2023, 10, 26, 14, 30) # 2:30 PM UTC
-    et_dt_from_utc = convert_to_et(naive_utc_dt, original_tz_str='UTC')
-    if et_dt_from_utc:
-        print(f"Naive UTC {naive_utc_dt} to ET: {et_dt_from_utc.strftime('%Y-%m-%d %H:%M:%S %Z%z')}") # Expected: 2023-10-26 10:30:00 EDT-0400
+    # Example 1: Naive Python datetime, assume UTC
+    naive_py_dt_utc = std_datetime(2023, 10, 26, 14, 30) # 2:30 PM UTC
+    et_dt1 = convert_to_et(naive_py_dt_utc, original_tz_str='UTC')
+    if et_dt1:
+        print(f"Naive Py datetime (UTC) {naive_py_dt_utc} -> ET: {et_dt1.format_common_iso()} ({et_dt1.tz})")
+        # Expected: 2023-10-26T10:30:00-04:00[America/New_York]
 
-    # 2. Naive datetime, assuming it's London time (BST during summer, GMT during winter)
-    # London is UTC+1 on this date (BST)
-    naive_london_dt = datetime.datetime(2023, 8, 15, 15, 30) # 3:30 PM London time
-    et_dt_from_london = convert_to_et(naive_london_dt, original_tz_str='Europe/London')
-    if et_dt_from_london:
-        print(f"Naive London {naive_london_dt} to ET: {et_dt_from_london.strftime('%Y-%m-%d %H:%M:%S %Z%z')}") # Expected: 2023-08-15 10:30:00 EDT-0400
+    # Example 2: Aware Python datetime (UTC)
+    aware_py_dt_utc = std_datetime(2023, 11, 5, 14, 30, tzinfo=std_timezone.utc) # 2:30 PM UTC
+    et_dt2 = convert_to_et(aware_py_dt_utc)
+    if et_dt2:
+        print(f"Aware Py datetime (UTC) {aware_py_dt_utc} -> ET: {et_dt2.format_common_iso()} ({et_dt2.tz})")
+        # Expected: 2023-11-05T09:30:00-05:00[America/New_York] (EST)
 
-    # 3. Already timezone-aware datetime (e.g., UTC)
-    aware_utc_dt = pytz.utc.localize(datetime.datetime(2023, 11, 5, 14, 30)) # 2:30 PM UTC
-    et_dt_from_aware_utc = convert_to_et(aware_utc_dt)
-    if et_dt_from_aware_utc:
-        print(f"Aware UTC {aware_utc_dt.strftime('%Y-%m-%d %H:%M:%S %Z%z')} to ET: {et_dt_from_aware_utc.strftime('%Y-%m-%d %H:%M:%S %Z%z')}") # Expected: 2023-11-05 09:30:00 EST-0500 (after DST change)
+    # Example 3: Unix timestamp
+    unix_ts = 1678624200 # This is March 12, 2023 08:30 AM ET (EDT)
+    et_dt3 = convert_to_et(unix_ts)
+    if et_dt3:
+        print(f"Unix timestamp {unix_ts} -> ET: {et_dt3.format_common_iso()} ({et_dt3.tz})")
+        # Expected: 2023-03-12T08:30:00-04:00[America/New_York]
 
-    # 4. Naive datetime with no original timezone (should print error)
-    ambiguous_naive_dt = datetime.datetime(2023, 10, 26, 10, 30)
-    print(f"Trying to convert naive {ambiguous_naive_dt} without original_tz_str:")
-    convert_to_et(ambiguous_naive_dt)
+    # Example 4: ISO String (UTC)
+    iso_str_utc = "2023-08-15T13:30:00Z"
+    et_dt4 = convert_to_et(iso_str_utc)
+    if et_dt4:
+        print(f"ISO string (UTC) '{iso_str_utc}' -> ET: {et_dt4.format_common_iso()} ({et_dt4.tz})")
+        # Expected: 2023-08-15T09:30:00-04:00[America/New_York]
 
-    # 5. DST "fall back" example for original_tz_str (e.g. 'America/New_York')
-    # On 2023-11-05, 1:30 AM ET happens twice.
-    # pytz.localize by default raises AmbiguousTimeError. Handled in function.
-    naive_ambiguous_dt_in_et = datetime.datetime(2023, 11, 5, 1, 30, 0)
-    print(f"Naive ambiguous {naive_ambiguous_dt_in_et} (pretending it's ET) to ET:")
-    converted_ambiguous = convert_to_et(naive_ambiguous_dt_in_et, original_tz_str='America/New_York')
-    if converted_ambiguous:
-         print(f"Converted ambiguous ET: {converted_ambiguous.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")
+    # Example 5: ISO String with offset
+    iso_str_offset = "2023-08-15T15:30:00+02:00" # e.g. CEST
+    et_dt5 = convert_to_et(iso_str_offset)
+    if et_dt5:
+        print(f"ISO string (offset) '{iso_str_offset}' -> ET: {et_dt5.format_common_iso()} ({et_dt5.tz})")
+        # 15:30+02:00 is 13:30 UTC -> 09:30 ET (EDT)
+        # Expected: 2023-08-15T09:30:00-04:00[America/New_York]
 
-    # 6. DST "spring forward" example for original_tz_str (e.g. 'America/New_York')
-    # On 2023-03-12, 2:30 AM ET does not exist.
-    # pytz.localize by default raises NonExistentTimeError. Handled in function.
-    naive_non_existent_dt_in_et = datetime.datetime(2024, 3, 10, 2, 30, 0) # Spring forward for ET in 2024
-    print(f"Naive non-existent {naive_non_existent_dt_in_et} (pretending it's ET) to ET:")
-    converted_non_existent = convert_to_et(naive_non_existent_dt_in_et, original_tz_str='America/New_York')
-    if converted_non_existent:
-        print(f"Converted non-existent ET: {converted_non_existent.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")
+    # Example 6: Plain string, assume original_tz_str is 'Europe/London'
+    plain_str_london = "2023-10-29 01:30:00" # This is ambiguous in London (DST end)
+    print(f"\nPlain string '{plain_str_london}', assume 'Europe/London':")
+    et_dt6_earlier = convert_to_et(whenever.PlainDateTime.parse_common_iso(plain_str_london).assume_tz("Europe/London", disambiguate="earlier"))
+    if et_dt6_earlier:
+         print(f"  (earlier) -> ET: {et_dt6_earlier.format_common_iso()} ({et_dt6_earlier.tz})")
+    et_dt6_later = convert_to_et(whenever.PlainDateTime.parse_common_iso(plain_str_london).assume_tz("Europe/London", disambiguate="later"))
+    if et_dt6_later:
+         print(f"  (later)   -> ET: {et_dt6_later.format_common_iso()} ({et_dt6_later.tz})")
+    print("  (raise - should print error and return None):")
+    et_dt6_raise = convert_to_et(whenever.PlainDateTime.from_py_datetime(std_datetime.strptime(plain_str_london, "%Y-%m-%d %H:%M:%S")), original_tz_str="Europe/London") # default disambiguate='raise'
+    if et_dt6_raise:
+        print(f"  (raise)   -> ET: {et_dt6_raise.format_common_iso()} ({et_dt6_raise.tz})")
     else:
-        print(f"Conversion failed for non-existent time as expected by current simple handling.")
+        print(f"  (raise)   -> Conversion returned None as expected or printed error.")
 
+
+    # Example 7: Naive string, assume ET (TARGET_TZ)
+    naive_str_et = "2023-11-05 01:30:00" # Ambiguous in ET
+    print(f"\nNaive string '{naive_str_et}', assume ET (default original_tz for string):")
+    # Test convert_to_et with string directly, it should assume TARGET_TZ if original_tz_str is None
+    et_dt7 = convert_to_et(naive_str_et) # original_tz_str=None, so convert_to_et assumes TARGET_TZ for naive strings
+    if et_dt7: # This will pick one due to pandas->py_datetime->PlainDateTime->assume_tz(TARGET_TZ, disambiguate='raise')
+                # which will actually raise because convert_to_et calls itself with TARGET_TZ.
+        print(f"  -> ET: {et_dt7.format_common_iso()} ({et_dt7.tz})")
+    else:
+        print(f"  -> Conversion returned None or printed error (expected for ambiguous if disamb='raise').")
+
+
+    # Example 8: Non-existent time (spring forward)
+    non_existent_str = "2024-03-10 02:30:00" # Does not exist in ET
+    print(f"\nNon-existent string '{non_existent_str}', assume ET:")
+    et_dt8 = convert_to_et(non_existent_str) # Should use TARGET_TZ, disambiguate='raise'
+    if et_dt8:
+        print(f"  -> ET: {et_dt8.format_common_iso()} ({et_dt8.tz})")
+    else:
+        print(f"  -> Conversion returned None or printed error (expected for non-existent).")
 
     # --- get_market_open_close_et examples ---
     print("\n--- get_market_open_close_et examples ---")
-    # 1. Standard day
-    trade_date_summer = datetime.date(2023, 8, 15) # During EDT
-    open_summer, close_summer = get_market_open_close_et(trade_date_summer)
-    if open_summer and close_summer:
-        print(f"Market times for {trade_date_summer}:")
-        print(f"Open: {open_summer.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")   # Expected: 2023-08-15 09:30:00 EDT-0400
-        print(f"Close: {close_summer.strftime('%Y-%m-%d %H:%M:%S %Z%z')}") # Expected: 2023-08-15 16:00:00 EDT-0400
+    date_summer = whenever.Date(2023, 8, 15) # During EDT
+    open_s, close_s = get_market_open_close_et(date_summer)
+    if open_s and close_s:
+        print(f"Market times for {date_summer.format_common_iso()}: Open: {open_s.format_common_iso()}, Close: {close_s.format_common_iso()}")
 
-    # 2. Day after DST ends (becomes EST)
-    trade_date_winter = datetime.date(2023, 11, 6) # After fall back to EST
-    open_winter, close_winter = get_market_open_close_et(trade_date_winter)
-    if open_winter and close_winter:
-        print(f"Market times for {trade_date_winter}:")
-        print(f"Open: {open_winter.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")   # Expected: 2023-11-06 09:30:00 EST-0500
-        print(f"Close: {close_winter.strftime('%Y-%m-%d %H:%M:%S %Z%z')}") # Expected: 2023-11-06 16:00:00 EST-0500
+    date_winter = whenever.Date(2023, 11, 6) # During EST
+    open_w, close_w = get_market_open_close_et(date_winter)
+    if open_w and close_w:
+        print(f"Market times for {date_winter.format_common_iso()}: Open: {open_w.format_common_iso()}, Close: {close_w.format_common_iso()}")
 
-    # 3. Custom market times
-    trade_date_custom = datetime.date(2023, 10, 10)
-    open_custom, close_custom = get_market_open_close_et(trade_date_custom, open_time_str="08:00", close_time_str="14:30")
-    if open_custom and close_custom:
-        print(f"Custom market times for {trade_date_custom}:")
-        print(f"Open: {open_custom.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")
-        print(f"Close: {close_custom.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")
+    # Test DST transition day for market open (spring forward)
+    date_dst_start = whenever.Date(2024, 3, 10)
+    print(f"\nMarket open/close for DST start {date_dst_start.format_common_iso()}:")
+    op, cl = get_market_open_close_et(date_dst_start)
+    if op and cl:
+        print(f"  Open: {op.format_common_iso()}, Close: {cl.format_common_iso()}")
 
-    # 4. Invalid time string
-    print("Testing invalid time string for market open/close:")
-    get_market_open_close_et(datetime.date(2023, 1, 1), open_time_str="99:00")
+    # Test DST transition day for market open (fall back)
+    date_dst_end = whenever.Date(2023, 11, 5) # Ambiguous hour 1-2 AM
+    print(f"\nMarket open/close for DST end {date_dst_end.format_common_iso()}:")
+    op_e, cl_e = get_market_open_close_et(date_dst_end)
+    if op_e and cl_e: # 9:30 AM is not ambiguous
+        print(f"  Open: {op_e.format_common_iso()}, Close: {cl_e.format_common_iso()}")
 
-    # Example of a DST transition day itself for market open/close
-    # For US markets, DST transitions are typically on Sunday at 2 AM, when markets are closed.
-    # So, 9:30 AM / 4:00 PM on a DST transition Sunday (if it were a trading day) would be unambiguous.
-    dst_start_2024 = datetime.date(2024, 3, 10) # Spring forward in US
-    open_dst_start, close_dst_start = get_market_open_close_et(dst_start_2024)
-    if open_dst_start and close_dst_start:
-        print(f"Market times for DST start {dst_start_2024}:")
-        print(f"Open: {open_dst_start.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")   # 2024-03-10 09:30:00 EDT-0400
-        print(f"Close: {close_dst_start.strftime('%Y-%m-%d %H:%M:%S %Z%z')}") # 2024-03-10 16:00:00 EDT-0400
+    # Test invalid time string
+    print("\nMarket open/close with invalid time string:")
+    op_inv, cl_inv = get_market_open_close_et(whenever.Date(2023,1,1), open_time_str="99:00")
+    if not op_inv and not cl_inv:
+        print("  Correctly returned None for invalid time string.")
 
-    dst_end_2023 = datetime.date(2023, 11, 5) # Fall back in US
-    open_dst_end, close_dst_end = get_market_open_close_et(dst_end_2023)
-    if open_dst_end and close_dst_end:
-        print(f"Market times for DST end {dst_end_2023}:")
-        print(f"Open: {open_dst_end.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")   # 2023-11-05 09:30:00 EST-0500 (after the 1 AM EST repeat)
-        print(f"Close: {close_dst_end.strftime('%Y-%m-%d %H:%M:%S %Z%z')}") # 2023-11-05 16:00:00 EST-0500
+    # Test with datetime.date input
+    py_date_input = std_date(2023, 7, 1)
+    print(f"\nMarket open/close for Python date {py_date_input}:")
+    op_pyd, cl_pyd = get_market_open_close_et(py_date_input)
+    if op_pyd and cl_pyd:
+        print(f"  Open: {op_pyd.format_common_iso()}, Close: {cl_pyd.format_common_iso()}")

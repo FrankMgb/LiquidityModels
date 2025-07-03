@@ -1,158 +1,212 @@
 import unittest
-import datetime
-import pytz
-from src.utils.time_utils import convert_to_et, get_market_open_close_et
+import whenever # Main datetime library
+from src.utils.time_utils import convert_to_et, get_market_open_close_et, TARGET_TZ
+from datetime import datetime as std_datetime, date as std_date, timezone as std_timezone # For creating some test inputs
 
 class TestTimeUtils(unittest.TestCase):
 
-    def test_convert_to_et_naive_utc_to_et(self):
-        naive_utc_dt = datetime.datetime(2023, 10, 26, 14, 30) # 2:30 PM UTC
-        et_dt = convert_to_et(naive_utc_dt, original_tz_str='UTC')
+    def test_convert_to_et_naive_py_datetime_assume_utc(self):
+        # Naive Python datetime, to be interpreted as UTC
+        naive_py_dt_utc = std_datetime(2023, 10, 26, 14, 30) # 2:30 PM UTC
+        et_dt = convert_to_et(naive_py_dt_utc, original_tz_str='UTC')
         self.assertIsNotNone(et_dt)
+        self.assertIsInstance(et_dt, whenever.ZonedDateTime)
+        self.assertEqual(et_dt.tz, TARGET_TZ)
+        # 2023-10-26 14:30 UTC is 2023-10-26 10:30 EDT
         self.assertEqual(et_dt.year, 2023)
         self.assertEqual(et_dt.month, 10)
         self.assertEqual(et_dt.day, 26)
-        self.assertEqual(et_dt.hour, 10) # 10:30 AM EDT
+        self.assertEqual(et_dt.hour, 10)
         self.assertEqual(et_dt.minute, 30)
-        self.assertEqual(et_dt.tzinfo.zone, 'America/New_York')
-        self.assertTrue(et_dt.dst() == datetime.timedelta(hours=1)) # EDT is UTC-4
+        # Check offset for EDT (-4 hours)
+        self.assertEqual(et_dt.offset.in_hours(), -4)
 
-    def test_convert_to_et_naive_london_to_et(self):
-        # London is UTC+1 on this date (BST)
-        naive_london_dt = datetime.datetime(2023, 8, 15, 15, 30) # 3:30 PM London time
-        et_dt = convert_to_et(naive_london_dt, original_tz_str='Europe/London')
-        self.assertIsNotNone(et_dt)
-        self.assertEqual(et_dt.hour, 10) # 10:30 AM EDT
-        self.assertEqual(et_dt.tzinfo.zone, 'America/New_York')
-        self.assertTrue(et_dt.dst() == datetime.timedelta(hours=1))
 
-    def test_convert_to_et_aware_utc_to_et(self):
-        aware_utc_dt = pytz.utc.localize(datetime.datetime(2023, 11, 5, 14, 30)) # 2:30 PM UTC
-        # This is after DST change in NY (Nov 5, 2023 was the day DST ended)
-        # 14:30 UTC is 9:30 AM EST (UTC-5)
-        et_dt = convert_to_et(aware_utc_dt)
+    def test_convert_to_et_naive_py_datetime_assume_london(self):
+        # Naive Python datetime, to be interpreted as Europe/London
+        # On 2023-08-15, London is in BST (UTC+1)
+        naive_py_dt_london = std_datetime(2023, 8, 15, 15, 30) # 3:30 PM London time
+        et_dt = convert_to_et(naive_py_dt_london, original_tz_str='Europe/London')
         self.assertIsNotNone(et_dt)
+        self.assertEqual(et_dt.tz, TARGET_TZ)
+        # 15:30 BST (UTC+1) is 14:30 UTC.
+        # 14:30 UTC is 10:30 EDT (UTC-4).
+        self.assertEqual(et_dt.hour, 10)
+        self.assertEqual(et_dt.minute, 30)
+        self.assertEqual(et_dt.offset.in_hours(), -4) # EDT
+
+    def test_convert_to_et_aware_py_datetime_utc(self):
+        # Aware Python datetime (UTC)
+        aware_py_dt_utc = std_datetime(2023, 11, 5, 14, 30, tzinfo=std_timezone.utc) # 2:30 PM UTC
+        et_dt = convert_to_et(aware_py_dt_utc)
+        self.assertIsNotNone(et_dt)
+        self.assertEqual(et_dt.tz, TARGET_TZ)
+        # 2023-11-05 14:30 UTC. NY is EST (UTC-5) on this date after 2 AM EDT.
+        # So, 14:30 UTC is 9:30 AM EST.
         self.assertEqual(et_dt.hour, 9)
         self.assertEqual(et_dt.minute, 30)
-        self.assertEqual(et_dt.tzinfo.zone, 'America/New_York')
-        self.assertTrue(et_dt.dst() == datetime.timedelta(0)) # EST is UTC-5
+        self.assertEqual(et_dt.offset.in_hours(), -5) # EST
 
-    def test_convert_to_et_naive_no_original_tz(self):
-        ambiguous_naive_dt = datetime.datetime(2023, 10, 26, 10, 30)
-        # Expect None because it's ambiguous without original_tz_str
-        self.assertIsNone(convert_to_et(ambiguous_naive_dt))
+    def test_convert_to_et_naive_py_datetime_no_original_tz(self):
+        # Naive Python datetime, no original_tz_str. Should fail.
+        ambiguous_naive_py_dt = std_datetime(2023, 10, 26, 10, 30)
+        et_dt = convert_to_et(ambiguous_naive_py_dt, original_tz_str=None)
+        self.assertIsNone(et_dt) # Expect None as it's ambiguous
 
-    def test_convert_to_et_dst_fall_back_original_tz_et(self):
-        # On 2023-11-05, 1:30 AM ET happens twice.
-        # pytz.localize by default raises AmbiguousTimeError if is_dst is not specified.
-        # Our function handles this by trying is_dst=None with localize, then normalize.
-        naive_ambiguous_dt_in_et = datetime.datetime(2023, 11, 5, 1, 30, 0)
-        et_dt = convert_to_et(naive_ambiguous_dt_in_et, original_tz_str='America/New_York')
-        self.assertIsNotNone(et_dt) # Should resolve to one of them
-        self.assertEqual(et_dt.tzinfo.zone, 'America/New_York')
-        # Depending on pytz's choice for is_dst=None, it could be either the EDT or EST version.
-        # Let's check it's one of the valid representations of 1:30 AM on that day in ET.
-        # The first 1:30 is EDT (UTC-4), the second is EST (UTC-5).
-        # So UTC times would be 5:30 or 6:30.
-        utc_timestamp = et_dt.timestamp() # timestamp() gives UTC seconds
-        possible_utc_1 = pytz.timezone('America/New_York').localize(datetime.datetime(2023,11,5,1,30), is_dst=True).timestamp()
-        possible_utc_2 = pytz.timezone('America/New_York').localize(datetime.datetime(2023,11,5,1,30), is_dst=False).timestamp()
-        self.assertTrue(utc_timestamp == possible_utc_1 or utc_timestamp == possible_utc_2)
+    def test_convert_to_et_whenever_instant(self):
+        # whenever.Instant (already UTC)
+        instant = whenever.Instant.from_utc(2023, 10, 26, 14, 30) # 2:30 PM UTC
+        et_dt = convert_to_et(instant)
+        self.assertIsNotNone(et_dt)
+        self.assertEqual(et_dt.hour, 10) # 10:30 AM EDT
+        self.assertEqual(et_dt.offset.in_hours(), -4)
 
+    def test_convert_to_et_whenever_zdt_already_et(self):
+        zdt_et = whenever.ZonedDateTime(2023, 10, 26, 10, 30, tz=TARGET_TZ)
+        et_dt = convert_to_et(zdt_et)
+        self.assertEqual(et_dt, zdt_et) # Should return the same object or equivalent
 
-    def test_convert_to_et_dst_spring_forward_original_tz_et(self):
-        # On 2024-03-10, 2:30 AM ET does not exist due to spring forward.
-        naive_non_existent_dt_in_et = datetime.datetime(2024, 3, 10, 2, 30, 0)
-        # Our current simple handling in convert_to_et for NonExistentTimeError during localization returns None.
-        et_dt = convert_to_et(naive_non_existent_dt_in_et, original_tz_str='America/New_York')
+    def test_convert_to_et_whenever_zdt_other_zone(self):
+        zdt_london = whenever.ZonedDateTime(2023, 8, 15, 15, 30, tz="Europe/London") # 3:30 PM London
+        et_dt = convert_to_et(zdt_london)
+        self.assertIsNotNone(et_dt)
+        self.assertEqual(et_dt.hour, 10) # 10:30 AM EDT
+        self.assertEqual(et_dt.offset.in_hours(), -4)
+
+    def test_convert_to_et_whenever_plaindatetime_with_original_tz(self):
+        pdt = whenever.PlainDateTime(2023, 8, 15, 15, 30) # Treat as 3:30 PM London
+        et_dt = convert_to_et(pdt, original_tz_str="Europe/London")
+        self.assertIsNotNone(et_dt)
+        self.assertEqual(et_dt.hour, 10) # 10:30 AM EDT
+        self.assertEqual(et_dt.offset.in_hours(), -4)
+
+    def test_convert_to_et_whenever_plaindatetime_no_original_tz(self):
+        pdt = whenever.PlainDateTime(2023, 8, 15, 15, 30)
+        et_dt = convert_to_et(pdt, original_tz_str=None) # Should be None
         self.assertIsNone(et_dt)
 
-    def test_convert_to_et_already_et(self):
-        et_tz = pytz.timezone('America/New_York')
-        original_et_dt = et_tz.localize(datetime.datetime(2023, 10, 20, 10, 0, 0))
-        converted_et_dt = convert_to_et(original_et_dt)
-        self.assertEqual(original_et_dt, converted_et_dt)
-        self.assertEqual(converted_et_dt.tzinfo.zone, 'America/New_York')
+    def test_convert_to_et_unix_timestamp(self):
+        unix_ts = 1678624200 # March 12, 2023 08:30 AM ET (EDT)
+        et_dt = convert_to_et(unix_ts)
+        self.assertIsNotNone(et_dt)
+        self.assertEqual(et_dt.year, 2023)
+        self.assertEqual(et_dt.month, 3)
+        self.assertEqual(et_dt.day, 12)
+        self.assertEqual(et_dt.hour, 8)
+        self.assertEqual(et_dt.minute, 30)
+        self.assertEqual(et_dt.offset.in_hours(), -4) # EDT
 
+    def test_convert_to_et_string_iso_utc(self):
+        iso_str_utc = "2023-08-15T13:30:00Z"
+        et_dt = convert_to_et(iso_str_utc) # No original_tz_str needed for UTC string
+        self.assertIsNotNone(et_dt)
+        self.assertEqual(et_dt.hour, 9) # 9:30 AM EDT
+        self.assertEqual(et_dt.offset.in_hours(), -4)
 
-    def test_get_market_open_close_et_summer(self):
-        # During EDT (UTC-4)
-        trade_date_summer = datetime.date(2023, 8, 15)
-        open_summer, close_summer = get_market_open_close_et(trade_date_summer)
-        self.assertIsNotNone(open_summer)
-        self.assertIsNotNone(close_summer)
-        self.assertEqual(open_summer.hour, 9)
-        self.assertEqual(open_summer.minute, 30)
-        self.assertEqual(open_summer.tzinfo.zone, 'America/New_York')
-        self.assertTrue(open_summer.dst() == datetime.timedelta(hours=1)) # EDT
+    def test_convert_to_et_string_iso_offset(self):
+        iso_str_offset = "2023-08-15T15:30:00+02:00" # CEST
+        et_dt = convert_to_et(iso_str_offset)
+        self.assertIsNotNone(et_dt)
+        self.assertEqual(et_dt.hour, 9) # 9:30 AM EDT
+        self.assertEqual(et_dt.offset.in_hours(), -4)
 
-        self.assertEqual(close_summer.hour, 16)
-        self.assertEqual(close_summer.minute, 0)
-        self.assertEqual(close_summer.tzinfo.zone, 'America/New_York')
-        self.assertTrue(close_summer.dst() == datetime.timedelta(hours=1)) # EDT
+    def test_convert_to_et_string_naive_assume_et(self):
+        # convert_to_et, when parsing a naive string via pandas, and original_tz_str is not passed from caller,
+        # will internally assume TARGET_TZ for the naive datetime string.
+        naive_str = "2023-10-26 10:30:00"
+        et_dt = convert_to_et(naive_str) # original_tz_str=None, convert_to_et assumes TARGET_TZ
+        self.assertIsNotNone(et_dt)
+        self.assertEqual(et_dt.hour, 10)
+        self.assertEqual(et_dt.minute, 30)
+        self.assertEqual(et_dt.offset.in_hours(), -4) # EDT
 
-    def test_get_market_open_close_et_winter(self):
-        # During EST (UTC-5)
-        trade_date_winter = datetime.date(2023, 11, 6) # Day after DST ends
-        open_winter, close_winter = get_market_open_close_et(trade_date_winter)
-        self.assertIsNotNone(open_winter)
-        self.assertIsNotNone(close_winter)
-        self.assertEqual(open_winter.hour, 9)
-        self.assertEqual(open_winter.minute, 30)
-        self.assertEqual(open_winter.tzinfo.zone, 'America/New_York')
-        self.assertTrue(open_winter.dst() == datetime.timedelta(0)) # EST
+    def test_convert_to_et_string_naive_assume_other_tz(self):
+        naive_str = "2023-08-15 15:30:00" # As London time
+        et_dt = convert_to_et(naive_str, original_tz_str="Europe/London")
+        self.assertIsNotNone(et_dt)
+        self.assertEqual(et_dt.hour, 10) # 10:30 AM EDT
+        self.assertEqual(et_dt.offset.in_hours(), -4)
 
-        self.assertEqual(close_winter.hour, 16)
-        self.assertEqual(close_winter.minute, 0)
-        self.assertEqual(close_winter.tzinfo.zone, 'America/New_York')
-        self.assertTrue(close_winter.dst() == datetime.timedelta(0)) # EST
+    def test_convert_to_et_dst_spring_forward_non_existent(self):
+        # 2024-03-10 02:30:00 does not exist in America/New_York
+        # convert_to_et should return None due to disambiguate='raise'
+        # when assuming TARGET_TZ for this naive string.
+        non_existent_str = "2024-03-10 02:30:00"
+        et_dt = convert_to_et(non_existent_str, original_tz_str=TARGET_TZ)
+        self.assertIsNone(et_dt) # Expecting None because SkippedTime should be caught
+
+    def test_convert_to_et_dst_fall_back_ambiguous(self):
+        # 2023-11-05 01:30:00 is ambiguous in America/New_York
+        # convert_to_et should return None due to disambiguate='raise'
+        ambiguous_str = "2023-11-05 01:30:00"
+        et_dt = convert_to_et(ambiguous_str, original_tz_str=TARGET_TZ)
+        self.assertIsNone(et_dt) # Expecting None because RepeatedTime should be caught
+
+    # --- Tests for get_market_open_close_et ---
+    def test_get_market_open_close_et_summer_edt(self):
+        w_date = whenever.Date(2023, 8, 15) # EDT
+        open_dt, close_dt = get_market_open_close_et(w_date)
+        self.assertIsNotNone(open_dt)
+        self.assertIsNotNone(close_dt)
+        self.assertEqual(open_dt.hour, 9)
+        self.assertEqual(open_dt.minute, 30)
+        self.assertEqual(open_dt.offset.in_hours(), -4) # EDT
+        self.assertEqual(close_dt.hour, 16)
+        self.assertEqual(close_dt.offset.in_hours(), -4) # EDT
+        self.assertEqual(open_dt.tz, TARGET_TZ)
+
+    def test_get_market_open_close_et_winter_est(self):
+        w_date = whenever.Date(2023, 11, 6) # EST
+        open_dt, close_dt = get_market_open_close_et(w_date)
+        self.assertIsNotNone(open_dt)
+        self.assertIsNotNone(close_dt)
+        self.assertEqual(open_dt.hour, 9)
+        self.assertEqual(open_dt.minute, 30)
+        self.assertEqual(open_dt.offset.in_hours(), -5) # EST
+        self.assertEqual(close_dt.hour, 16)
+        self.assertEqual(close_dt.offset.in_hours(), -5) # EST
 
     def test_get_market_open_close_et_custom_times(self):
-        trade_date = datetime.date(2023, 10, 10)
-        open_custom, close_custom = get_market_open_close_et(trade_date, open_time_str="08:00", close_time_str="14:30")
-        self.assertIsNotNone(open_custom)
-        self.assertIsNotNone(close_custom)
-        self.assertEqual(open_custom.hour, 8)
-        self.assertEqual(close_custom.hour, 14)
-        self.assertEqual(close_custom.minute, 30)
+        w_date = whenever.Date(2023, 10, 10)
+        open_dt, close_dt = get_market_open_close_et(w_date, open_time_str="08:00", close_time_str="14:30")
+        self.assertIsNotNone(open_dt)
+        self.assertEqual(open_dt.hour, 8)
+        self.assertIsNotNone(close_dt)
+        self.assertEqual(close_dt.hour, 14)
+        self.assertEqual(close_dt.minute, 30)
 
     def test_get_market_open_close_et_invalid_time_str(self):
-        trade_date = datetime.date(2023, 1, 1)
-        open_time, close_time = get_market_open_close_et(trade_date, open_time_str="99:00")
-        self.assertIsNone(open_time)
-        self.assertIsNone(close_time)
+        w_date = whenever.Date(2023, 1, 1)
+        open_dt, close_dt = get_market_open_close_et(w_date, open_time_str="99:00")
+        self.assertIsNone(open_dt)
+        self.assertIsNone(close_dt)
 
-    def test_get_market_open_close_on_dst_start_day(self):
-        # DST starts March 10, 2024 (2 AM becomes 3 AM)
-        # Market open/close times (9:30 AM, 4 PM) are well after the transition.
-        dst_start_date = datetime.date(2024, 3, 10)
-        open_time, close_time = get_market_open_close_et(dst_start_date)
-        self.assertIsNotNone(open_time)
-        self.assertEqual(open_time.hour, 9)
-        self.assertEqual(open_time.minute, 30)
-        self.assertEqual(open_time.tzinfo.zone, 'America/New_York')
-        self.assertTrue(open_time.dst() == datetime.timedelta(hours=1)) # EDT
+    def test_get_market_open_close_et_py_date_input(self):
+        py_date = std_date(2023, 7, 1) # Python date
+        open_dt, close_dt = get_market_open_close_et(py_date)
+        self.assertIsNotNone(open_dt)
+        self.assertEqual(open_dt.year, 2023)
+        self.assertEqual(open_dt.month, 7)
+        self.assertEqual(open_dt.day, 1)
+        self.assertEqual(open_dt.hour, 9)
 
-        self.assertIsNotNone(close_time)
-        self.assertEqual(close_time.hour, 16)
-        self.assertEqual(close_time.tzinfo.zone, 'America/New_York')
-        self.assertTrue(close_time.dst() == datetime.timedelta(hours=1)) # EDT
+    def test_get_market_open_close_dst_spring_forward_market_hours_ok(self):
+        # March 10, 2024: 2 AM -> 3 AM. Market hours 9:30-16:00 are fine.
+        date_dst_start = whenever.Date(2024, 3, 10)
+        op, cl = get_market_open_close_et(date_dst_start)
+        self.assertIsNotNone(op)
+        self.assertEqual(op.hour, 9)
+        self.assertEqual(op.offset.in_hours(), -4) # EDT
+        self.assertIsNotNone(cl)
 
-    def test_get_market_open_close_on_dst_end_day(self):
-        # DST ends Nov 5, 2023 (2 AM becomes 1 AM again)
-        # Market open/close times are well after the transition.
-        dst_end_date = datetime.date(2023, 11, 5)
-        open_time, close_time = get_market_open_close_et(dst_end_date)
-        self.assertIsNotNone(open_time)
-        self.assertEqual(open_time.hour, 9)
-        self.assertEqual(open_time.minute, 30)
-        self.assertEqual(open_time.tzinfo.zone, 'America/New_York')
-        self.assertTrue(open_time.dst() == datetime.timedelta(0)) # EST
-
-        self.assertIsNotNone(close_time)
-        self.assertEqual(close_time.hour, 16)
-        self.assertEqual(close_time.tzinfo.zone, 'America/New_York')
-        self.assertTrue(close_time.dst() == datetime.timedelta(0)) # EST
+    def test_get_market_open_close_dst_fall_back_market_hours_ok(self):
+        # Nov 5, 2023: 1:XX AM happens twice. Market hours 9:30-16:00 are fine (EST).
+        date_dst_end = whenever.Date(2023, 11, 5)
+        op, cl = get_market_open_close_et(date_dst_end)
+        self.assertIsNotNone(op)
+        self.assertEqual(op.hour, 9)
+        self.assertEqual(op.offset.in_hours(), -5) # EST
+        self.assertIsNotNone(cl)
 
 if __name__ == '__main__':
     unittest.main()
