@@ -1,9 +1,37 @@
 import whenever
 import pandas as pd # Keep for initial flexible string parsing
-from datetime import datetime as std_datetime, date as std_date, timezone as std_timezone # For type hints and conversion from pandas
+from datetime import datetime as std_datetime, date as std_date, time as std_time, timezone as std_timezone # For type hints and conversion from pandas
 
-# Define the target timezone string
-TARGET_TZ = "America/New_York"
+# Define the target timezone string and ZoneInfo object
+TARGET_TZ_STR = "America/New_York" # String identifier
+NY_ZONEINFO = whenever.ZoneInfo(TARGET_TZ_STR) # whenever.ZoneInfo object for direct use
+
+# Key ICT Time Level Constants (using whenever.Time for precision)
+# These represent wall times in New York.
+MARKET_OPEN_ET_TIME = whenever.Time(9, 30)
+IB_END_ET_TIME = whenever.Time(10, 30) # Initial Balance end
+MIDNIGHT_OPEN_ET_TIME = whenever.Time(0, 0)
+NEWS_EMBARGO_ET_TIME = whenever.Time(8, 30)
+FOUR_HOUR_CANDLE_ET_1_TIME = whenever.Time(10, 0)
+FOUR_HOUR_CANDLE_ET_2_TIME = whenever.Time(14, 0) # 2 PM
+
+# Killzone Time Constants (ET wall times)
+ASIAN_KILLZONE_START_TIME = whenever.Time(20, 0)  # 8:00 PM ET
+ASIAN_KILLZONE_END_TIME = whenever.Time(22, 0)    # 10:00 PM ET
+
+LONDON_KILLZONE_START_TIME = whenever.Time(2, 0)  # 2:00 AM ET
+LONDON_KILLZONE_END_TIME = whenever.Time(5, 0)    # 5:00 AM ET
+
+NY_KILLZONE_START_TIME = whenever.Time(7, 0)      # 7:00 AM ET
+NY_KILLZONE_END_TIME = whenever.Time(9, 0)        # 9:00 AM ET
+
+# LONDON_CLOSE_KILLZONE_START_TIME was defined in the plan, ensuring it's here.
+LONDON_CLOSE_KILLZONE_START_TIME = whenever.Time(10, 0) # 10:00 AM ET
+LONDON_CLOSE_KILLZONE_END_TIME = whenever.Time(12, 0)   # 12:00 PM ET
+
+# Weekly Open Time Constant
+WEEKLY_OPEN_SUNDAY_TIME = whenever.Time(18, 0)    # Sunday 6:00 PM ET
+
 
 def convert_to_et(timestamp_input: any, original_tz_str: str | None = None) -> whenever.ZonedDateTime | None:
     """
@@ -32,18 +60,18 @@ def convert_to_et(timestamp_input: any, original_tz_str: str | None = None) -> w
     try:
         # 1. Handle whenever native types
         if isinstance(timestamp_input, whenever.Instant):
-            return timestamp_input.to_tz(TARGET_TZ)
+            return timestamp_input.to_tz(NY_ZONEINFO)
         if isinstance(timestamp_input, whenever.ZonedDateTime):
-            if timestamp_input.tz == TARGET_TZ:
+            if timestamp_input.tz.name == TARGET_TZ_STR: # Compare by name for robustness
                 return timestamp_input
-            return timestamp_input.to_tz(TARGET_TZ)
+            return timestamp_input.to_tz(NY_ZONEINFO)
         if isinstance(timestamp_input, whenever.PlainDateTime):
             if not original_tz_str:
                 print(f"Error: whenever.PlainDateTime provided without original_tz_str. Ambiguous conversion for {timestamp_input}.")
                 return None
             # This will raise SkippedTime or RepeatedTime if ambiguous and disambiguate='raise' (default for assume_tz)
             # For our purpose, we want to know if the original_tz makes it invalid, so 'raise' is good.
-            return timestamp_input.assume_tz(original_tz_str, disambiguate='raise').to_tz(TARGET_TZ)
+                return timestamp_input.assume_tz(original_tz_str, disambiguate='raise').to_tz(NY_ZONEINFO)
 
         # 2. Handle Python datetime.datetime
         if isinstance(timestamp_input, std_datetime):
@@ -55,31 +83,31 @@ def convert_to_et(timestamp_input: any, original_tz_str: str | None = None) -> w
                 plain_dt = whenever.PlainDateTime.from_py_datetime(py_dt)
                 # This will use disambiguate='raise' by default if not specified,
                 # or we can be explicit. 'raise' helps identify invalid naive times.
-                return plain_dt.assume_tz(original_tz_str, disambiguate='raise').to_tz(TARGET_TZ)
+                return plain_dt.assume_tz(original_tz_str, disambiguate='raise').to_tz(NY_ZONEINFO)
             else: # Aware Python datetime
                 # Convert aware Python datetime to whenever.Instant first, then to ZonedDateTime
                 # Note: whenever.Instant.from_py_datetime expects UTC or raises error if tz is not ZoneInfo UTC.
                 # A more general path for aware py_dt is to convert to its UTC equivalent instant.
-                # If it has ZoneInfo, ZonedDateTime.from_py_datetime(py_dt).to_tz(TARGET_TZ) is better.
+                # If it has ZoneInfo, ZonedDateTime.from_py_datetime(py_dt).to_tz(NY_ZONEINFO) is better.
                 if isinstance(py_dt.tzinfo, type(std_timezone.utc)): # Check if it's stdlib UTC
                      instant = whenever.Instant.from_py_datetime(py_dt)
-                     return instant.to_tz(TARGET_TZ)
+                     return instant.to_tz(NY_ZONEINFO)
                 try:
                     # Attempt to convert directly if tzinfo is ZoneInfo (used by whenever)
                     # This requires py_dt.tzinfo to be a zoneinfo.ZoneInfo object.
                     # If pandas parsed a string with tz, it might be zoneinfo.
                     zdt = whenever.ZonedDateTime.from_py_datetime(py_dt)
-                    return zdt.to_tz(TARGET_TZ)
+                    return zdt.to_tz(NY_ZONEINFO)
                 except ValueError: # Likely if tzinfo is not what whenever expects (e.g. pytz)
                     # Fallback: convert to UTC instant then to target TZ
                     utc_py_dt = py_dt.astimezone(std_timezone.utc)
                     instant = whenever.Instant.from_py_datetime(utc_py_dt)
-                    return instant.to_tz(TARGET_TZ)
+                    return instant.to_tz(NY_ZONEINFO)
 
 
         # 3. Handle Unix timestamp (int/float)
         if isinstance(timestamp_input, (int, float)):
-            return whenever.Instant.from_timestamp(int(timestamp_input)).to_tz(TARGET_TZ)
+            return whenever.Instant.from_timestamp(int(timestamp_input)).to_tz(NY_ZONEINFO)
 
         # 4. Handle string inputs
         if isinstance(timestamp_input, str):
@@ -92,10 +120,10 @@ def convert_to_et(timestamp_input: any, original_tz_str: str | None = None) -> w
                     # Try OffsetDateTime first as it's more specific for offsets than Instant's ISO
                     try:
                         odt = whenever.OffsetDateTime.parse_common_iso(s)
-                        return odt.to_tz(TARGET_TZ)
+                        return odt.to_tz(NY_ZONEINFO)
                     except ValueError: # If not OffsetDateTime ISO, try Instant ISO (for Z)
                         instant = whenever.Instant.parse_common_iso(s)
-                        return instant.to_tz(TARGET_TZ)
+                        return instant.to_tz(NY_ZONEINFO)
             except ValueError:
                 pass # Fall through if not a direct ISO parse by whenever
 
@@ -130,8 +158,8 @@ def convert_to_et(timestamp_input: any, original_tz_str: str | None = None) -> w
                 if potential_tz_name_from_string:
                     final_original_tz_for_conversion = potential_tz_name_from_string
                 elif py_dt_from_pd.tzinfo is None and not final_original_tz_for_conversion:
-                    # If still naive and no TZ info from string or args, assume TARGET_TZ
-                    final_original_tz_for_conversion = TARGET_TZ
+                    # If still naive and no TZ info from string or args, assume TARGET_TZ_STR
+                    final_original_tz_for_conversion = TARGET_TZ_STR
 
                 # Now convert py_dt_from_pd using final_original_tz_for_conversion
                 # This recursive call handles the py_datetime object correctly.
@@ -163,8 +191,8 @@ def convert_to_et(timestamp_input: any, original_tz_str: str | None = None) -> w
 
 def get_market_open_close_et(
     date_input: any, # whenever.Date | std_date
-    open_time_str: str = "09:30",
-    close_time_str: str = "16:00"
+    open_time: whenever.Time = MARKET_OPEN_ET_TIME,
+    close_time: whenever.Time = whenever.Time(16,0) # Default market close 4 PM ET
 ) -> tuple[whenever.ZonedDateTime | None, whenever.ZonedDateTime | None]:
     """
     Calculates the market open and close times as whenever.ZonedDateTime objects in ET.
@@ -189,41 +217,22 @@ def get_market_open_close_et(
             print(f"Error: Invalid date_input type: {type(date_input)}. Expected whenever.Date or datetime.date.")
             return None, None
 
-        open_hour, open_minute = map(int, open_time_str.split(':'))
-        close_hour, close_minute = map(int, close_time_str.split(':'))
-
-        if not (0 <= open_hour <= 23 and 0 <= open_minute <= 59 and \
-                0 <= close_hour <= 23 and 0 <= close_minute <= 59):
-            raise ValueError("Hour or minute out of valid range.")
-
-        # Construct ZonedDateTime directly.
-        # For typical market hours (9:30, 16:00), 'compatible' or 'raise' are usually fine.
+        # Construct ZonedDateTime directly using whenever.Time objects
         # 'raise' is safer to ensure the exact time is valid.
-        # 'compatible' mimics Python's datetime.astimezone behavior during DST transitions.
-        # Let's use 'raise' to be strict.
-        market_open_et = whenever.ZonedDateTime(
-            w_date.year, w_date.month, w_date.day,
-            open_hour, open_minute,
-            tz=TARGET_TZ,
-            disambiguate='raise'
-        )
-        market_close_et = whenever.ZonedDateTime(
-            w_date.year, w_date.month, w_date.day,
-            close_hour, close_minute,
-            tz=TARGET_TZ,
-            disambiguate='raise'
-        )
+        market_open_et = NY_ZONEINFO.convert(w_date.at(open_time), disambiguate='raise')
+        market_close_et = NY_ZONEINFO.convert(w_date.at(close_time), disambiguate='raise')
+
         return market_open_et, market_close_et
 
-    except (ValueError, TypeError) as e_parse: # Catches map/split errors, int conversion, out of range
-        print(f"Error parsing time strings or date: '{open_time_str}', '{close_time_str}'. {e_parse}")
+    except (ValueError, TypeError) as e_parse: # Catches errors from at() or convert()
+        print(f"Error creating ZonedDateTime for market open/close: {e_parse}")
         return None, None
     except (whenever.SkippedTime, whenever.RepeatedTime) as e_dst:
-        # This would be rare for 9:30/16:00 but good to catch.
-        print(f"Error: DST transition issue for market time on {w_date.format_common_iso()}: {e_dst}")
+        # This would be rare for typical market hours but good to catch.
+        print(f"Error: DST transition issue for market time on {w_date.format_common_iso() if 'w_date' in locals() else 'unknown date'}: {e_dst}")
         return None, None
-    except whenever.TimeZoneNotFoundError as e_tz_not_found:
-        print(f"Error: Timezone '{TARGET_TZ}' not found: {e_tz_not_found}")
+    except whenever.TimeZoneNotFoundError: # Should not happen with NY_ZONEINFO
+        print(f"Error: Timezone '{TARGET_TZ_STR}' not found. This should not occur.")
         return None, None
     except Exception as e_general:
         print(f"An unexpected error in get_market_open_close_et: {e_general}")
@@ -345,3 +354,282 @@ if __name__ == '__main__':
     op_pyd, cl_pyd = get_market_open_close_et(py_date_input)
     if op_pyd and cl_pyd:
         print(f"  Open: {op_pyd.format_common_iso()}, Close: {cl_pyd.format_common_iso()}")
+
+    # --- Test Time Window Check Functions ---
+    print("\n--- Time Window Check Function Examples ---")
+    test_date_dst = whenever.Date(2024, 3, 10) # Spring forward EDT
+    test_date_std = whenever.Date(2024, 1, 10) # Standard time EST
+
+    # Test time for Initial Balance: 9:45 AM ET
+    dt_ib_test = NY_ZONEINFO.convert(test_date_dst.at(9, 45))
+    print(f"Is {dt_ib_test.format_common_iso()} within Initial Balance (9:30-10:30 ET)? {is_within_initial_balance_period(dt_ib_test)}")
+
+    # Test time for NY Killzone: 7:30 AM ET
+    dt_nykz_test = NY_ZONEINFO.convert(test_date_std.at(7, 30))
+    print(f"Is {dt_nykz_test.format_common_iso()} within NY Killzone (7-9 ET)? {is_within_ny_killzone(dt_nykz_test)}")
+    dt_nykz_test_outside = NY_ZONEINFO.convert(test_date_std.at(9, 30))
+    print(f"Is {dt_nykz_test_outside.format_common_iso()} within NY Killzone (7-9 ET)? {is_within_ny_killzone(dt_nykz_test_outside)}")
+
+
+    # Test time for London Killzone: 3:00 AM ET
+    dt_ldnkz_test = NY_ZONEINFO.convert(test_date_dst.at(3, 0))
+    print(f"Is {dt_ldnkz_test.format_common_iso()} within London Killzone (2-5 ET)? {is_within_london_killzone(dt_ldnkz_test)}")
+
+    # Test time for London Close Killzone: 10:30 AM ET
+    dt_ldnclosekz_test = NY_ZONEINFO.convert(test_date_std.at(10, 30))
+    print(f"Is {dt_ldnclosekz_test.format_common_iso()} within London Close KZ (10-12 ET)? {is_within_london_close_killzone(dt_ldnclosekz_test)}")
+
+    # Test time for Asian Killzone: 8:30 PM ET
+    dt_asiankz_test = NY_ZONEINFO.convert(test_date_dst.at(20, 30)) # 8:30 PM
+    print(f"Is {dt_asiankz_test.format_common_iso()} within Asian Killzone (8PM-10PM ET)? {is_within_asian_killzone(dt_asiankz_test)}")
+    dt_asiankz_test_outside = NY_ZONEINFO.convert(test_date_dst.at(19, 0)) # 7:00 PM
+    print(f"Is {dt_asiankz_test_outside.format_common_iso()} within Asian Killzone (8PM-10PM ET)? {is_within_asian_killzone(dt_asiankz_test_outside)}")
+
+
+    # Test for is_within_macro_time: 9:50 AM - 10:10 AM ET
+    macro_start = whenever.Time(9, 50)
+    macro_end = whenever.Time(10, 10)
+    dt_macro_inside = NY_ZONEINFO.convert(test_date_std.at(10, 0))
+    dt_macro_outside = NY_ZONEINFO.convert(test_date_std.at(10, 15))
+    print(f"Is {dt_macro_inside.format_common_iso()} within Macro Time (9:50-10:10 ET)? {is_within_macro_time(dt_macro_inside, macro_start, macro_end)}")
+    print(f"Is {dt_macro_outside.format_common_iso()} within Macro Time (9:50-10:10 ET)? {is_within_macro_time(dt_macro_outside, macro_start, macro_end)}")
+
+    # --- Test Data-Dependent Price Retrieval Functions ---
+    print("\n--- Data-Dependent Price Retrieval Function Examples ---")
+
+    # Sample OHLC DataFrame (1-minute data, America/New_York ZonedDateTimes)
+    sample_dates = [
+        # Sunday, Jan 7, 2024 (for weekly open)
+        NY_ZONEINFO.convert(whenever.Date(2024, 1, 7).at(18, 0)), # Sun 6:00 PM ET - Weekly Open
+        NY_ZONEINFO.convert(whenever.Date(2024, 1, 7).at(18, 1)),
+        # Monday, Jan 8, 2024
+        NY_ZONEINFO.convert(whenever.Date(2024, 1, 8).at(0, 0)),  # Midnight Open
+        NY_ZONEINFO.convert(whenever.Date(2024, 1, 8).at(0, 1)),
+        NY_ZONEINFO.convert(whenever.Date(2024, 1, 8).at(9, 29)),
+        NY_ZONEINFO.convert(whenever.Date(2024, 1, 8).at(9, 30)),  # NYSE Open
+        NY_ZONEINFO.convert(whenever.Date(2024, 1, 8).at(9, 31)),
+        # Tuesday, Jan 9, 2024
+        NY_ZONEINFO.convert(whenever.Date(2024, 1, 9).at(0, 0)), # Midnight Open for Tuesday
+        NY_ZONEINFO.convert(whenever.Date(2024, 1, 9).at(9, 30)), # NYSE Open for Tuesday
+    ]
+    sample_data = {
+        'timestamp': sample_dates,
+        'open': [100.00, 100.10, # Sunday
+                 101.00, 101.05, # Monday Midnight
+                 102.00, 102.50, 102.55, # Monday NYSE Open
+                 103.00, 103.50], # Tuesday
+        'high': [d + 0.5 for d in [100.00, 100.10, 101.00, 101.05, 102.00, 102.50, 102.55, 103.00, 103.50]],
+        'low': [d - 0.5 for d in [100.00, 100.10, 101.00, 101.05, 102.00, 102.50, 102.55, 103.00, 103.50]],
+        'close': [d + 0.2 for d in [100.00, 100.10, 101.00, 101.05, 102.00, 102.50, 102.55, 103.00, 103.50]],
+    }
+    sample_ohlc_df = pd.DataFrame(sample_data)
+
+    date_mon = whenever.Date(2024, 1, 8)
+    date_tue = whenever.Date(2024, 1, 9)
+
+    # Test get_midnight_open_price_for_day
+    price_midnight_mon = get_midnight_open_price_for_day(date_mon, sample_ohlc_df)
+    print(f"Midnight Open Price for {date_mon.format_common_iso()}: {price_midnight_mon}") # Expected: 101.00
+    price_midnight_tue = get_midnight_open_price_for_day(date_tue, sample_ohlc_df)
+    print(f"Midnight Open Price for {date_tue.format_common_iso()}: {price_midnight_tue}") # Expected: 103.00
+
+    # Test get_nyse_open_price_for_day
+    price_nyse_open_mon = get_nyse_open_price_for_day(date_mon, sample_ohlc_df)
+    print(f"NYSE Open Price for {date_mon.format_common_iso()}: {price_nyse_open_mon}") # Expected: 102.50
+    price_nyse_open_tue = get_nyse_open_price_for_day(date_tue, sample_ohlc_df) # Expected: 103.50
+    print(f"NYSE Open Price for {date_tue.format_common_iso()}: {price_nyse_open_tue}")
+
+
+    # Test get_weekly_open_price_for_week
+    # For Monday Jan 8
+    weekly_open_mon = get_weekly_open_price_for_week(date_mon, sample_ohlc_df)
+    print(f"Weekly Open Price relevant for {date_mon.format_common_iso()}: {weekly_open_mon}") # Expected: 100.00
+    # For Tuesday Jan 9
+    weekly_open_tue = get_weekly_open_price_for_week(date_tue, sample_ohlc_df)
+    print(f"Weekly Open Price relevant for {date_tue.format_common_iso()}: {weekly_open_tue}") # Expected: 100.00
+    # For Sunday Jan 7 itself
+    date_sun = whenever.Date(2024, 1, 7)
+    weekly_open_sun = get_weekly_open_price_for_week(date_sun, sample_ohlc_df)
+    print(f"Weekly Open Price relevant for {date_sun.format_common_iso()}: {weekly_open_sun}") # Expected: 100.00
+
+    # Test missing data
+    date_wed = whenever.Date(2024, 1, 10) # No data for this date in sample
+    price_missing = get_midnight_open_price_for_day(date_wed, sample_ohlc_df)
+    print(f"Midnight Open Price for {date_wed.format_common_iso()} (no data): {price_missing}") # Expected: None
+
+# --- Time Window Check Functions ---
+
+def is_within_time_window(
+    dt_object: whenever.ZonedDateTime,
+    start_time: whenever.Time,
+    end_time: whenever.Time
+) -> bool:
+    """
+    Checks if the time of a ZonedDateTime object falls within a given start and end time.
+    The comparison is inclusive of the start_time and exclusive of the end_time.
+    Assumes dt_object is already in the target timezone ('America/New_York').
+    Handles overnight windows where end_time is earlier than start_time (e.g., 8 PM to 5 AM).
+    """
+    if dt_object.tz.name != TARGET_TZ_STR:
+        # This check is a safeguard; calling code should ensure correct timezone.
+        # Consider raising an error or logging a warning if this occurs.
+        # For now, return False as it's an invalid state for these checks.
+        print(f"Warning: is_within_time_window called with dt_object in incorrect timezone: {dt_object.tz.name}")
+        return False
+
+    current_obj_time = dt_object.time()
+
+    if start_time <= end_time:
+        # Standard window (e.g., 9:30 AM to 10:30 AM)
+        return start_time <= current_obj_time < end_time
+    else:
+        # Overnight window (e.g., Asian session 8 PM to 10 PM, or a broader 8PM to 5AM next day)
+        # True if current_time is after start_time (e.g., >= 8 PM)
+        # OR current_time is before end_time (e.g., < 5 AM on the next day concept)
+        # This logic is for checking if a time falls within a *defined daily repeating window*.
+        # For Asian Killzone specifically, the "previous day" context is handled by the caller
+        # or by how the specific `is_within_asian_killzone` is implemented if it needs to be smarter.
+        # This helper is generic for time-only checks.
+        return current_obj_time >= start_time or current_obj_time < end_time
+
+
+def is_within_initial_balance_period(dt_object: whenever.ZonedDateTime) -> bool:
+    """
+    Checks if dt_object (in NY/ET) falls between 9:30 AM and 10:30 AM ET.
+    (Inclusive of 9:30 AM, exclusive of 10:30 AM).
+    """
+    return is_within_time_window(dt_object, MARKET_OPEN_ET_TIME, IB_END_ET_TIME)
+
+def is_within_ny_killzone(dt_object: whenever.ZonedDateTime) -> bool:
+    """
+    Checks if dt_object (in NY/ET) falls within the New York Killzone (7:00 AM – 9:00 AM ET).
+    (Inclusive of 7:00 AM, exclusive of 9:00 AM).
+    """
+    return is_within_time_window(dt_object, NY_KILLZONE_START_TIME, NY_KILLZONE_END_TIME)
+
+def is_within_london_killzone(dt_object: whenever.ZonedDateTime) -> bool:
+    """
+    Checks if dt_object (in NY/ET) falls within the London Killzone (2:00 AM – 5:00 AM ET).
+    (Inclusive of 2:00 AM, exclusive of 5:00 AM).
+    """
+    return is_within_time_window(dt_object, LONDON_KILLZONE_START_TIME, LONDON_KILLZONE_END_TIME)
+
+def is_within_london_close_killzone(dt_object: whenever.ZonedDateTime) -> bool:
+    """
+    Checks if dt_object (in NY/ET) falls within the London Close Killzone (10:00 AM – 12:00 PM ET).
+    (Inclusive of 10:00 AM, exclusive of 12:00 PM).
+    """
+    return is_within_time_window(dt_object, LONDON_CLOSE_KILLZONE_START_TIME, LONDON_CLOSE_KILLZONE_END_TIME)
+
+def is_within_asian_killzone(dt_object: whenever.ZonedDateTime) -> bool:
+    """
+    Checks if dt_object (in NY/ET) falls within the Asian Killzone (8:00 PM – 10:00 PM ET on its date).
+    (Inclusive of 8:00 PM, exclusive of 10:00 PM).
+    The "previous day" context for trading sessions is handled by the calling logic,
+    this function checks the time on the given dt_object's date.
+    """
+    # Asian session is 8 PM to 10 PM. This is a standard window, not overnight for this specific 2-hour KZ.
+    return is_within_time_window(dt_object, ASIAN_KILLZONE_START_TIME, ASIAN_KILLZONE_END_TIME)
+
+def is_within_macro_time(
+    dt_object: whenever.ZonedDateTime,
+    macro_start_time: whenever.Time,
+    macro_end_time: whenever.Time
+) -> bool:
+    """
+    Generic function to check if dt_object (in NY/ET) falls within a custom macro time window.
+    (Inclusive of macro_start_time, exclusive of macro_end_time).
+    """
+    return is_within_time_window(dt_object, macro_start_time, macro_end_time)
+
+# --- Data-Dependent Price Retrieval Functions ---
+
+def _get_price_at_time(
+    target_dt: whenever.ZonedDateTime,
+    ohlc_data_frame: pd.DataFrame
+) -> float | None:
+    """
+    Helper function to retrieve the 'open' price for a specific target ZonedDateTime
+    from an OHLC DataFrame.
+    Assumes 'timestamp' column in ohlc_data_frame contains timezone-aware objects
+    comparable to target_dt (ideally whenever.ZonedDateTime in NY_ZONEINFO).
+    Assumes 'open' column contains the price.
+    Assumes 1-minute granularity, so expects an exact match for the timestamp.
+    """
+    if not isinstance(target_dt, whenever.ZonedDateTime):
+        print(f"Error (_get_price_at_time): target_dt must be a whenever.ZonedDateTime. Got: {type(target_dt)}")
+        return None
+    if 'timestamp' not in ohlc_data_frame.columns or 'open' not in ohlc_data_frame.columns:
+        print("Error (_get_price_at_time): ohlc_data_frame must contain 'timestamp' and 'open' columns.")
+        return None
+
+    # Ensure target_dt is in NY_ZONEINFO for consistent comparison, though inputs should already be.
+    # This is more of a defensive check if upstream data isn't perfectly clean.
+    # However, the core assumption is that ohlc_data_frame['timestamp'] are ALREADY NY ZonedDateTimes.
+    # Direct comparison should work if types are consistent.
+    # If ohlc_data_frame['timestamp'] could be other types (e.g., pd.Timestamp),
+    # conversion or more careful comparison might be needed.
+    # For now, we assume direct equality check is sufficient given problem constraints.
+
+    match = ohlc_data_frame[ohlc_data_frame['timestamp'] == target_dt]
+
+    if not match.empty:
+        if len(match) > 1:
+            # This case should ideally not happen with 1-minute unique timestamp data.
+            print(f"Warning (_get_price_at_time): Multiple records found for {target_dt}. Using the first one.")
+        return match['open'].iloc[0]
+    else:
+        # print(f"Debug (_get_price_at_time): No record found for {target_dt}.")
+        return None
+
+def get_midnight_open_price_for_day(
+    target_date: whenever.Date,
+    ohlc_data_frame: pd.DataFrame
+) -> float | None:
+    """
+    Retrieves the Open price of the candle that includes 12:00 AM NY time
+    for the given target_date from ohlc_data_frame.
+    """
+    if not isinstance(target_date, whenever.Date):
+        print("Error (get_midnight_open_price_for_day): target_date must be a whenever.Date.")
+        return None
+
+    # Create the ZonedDateTime for 12:00 AM on target_date in New York.
+    # PlainDateTime.at() is combined with NY_ZONEINFO.convert() for DST handling.
+    target_dt = NY_ZONEINFO.convert(target_date.at(MIDNIGHT_OPEN_ET_TIME), disambiguate='raise')
+    return _get_price_at_time(target_dt, ohlc_data_frame)
+
+def get_nyse_open_price_for_day(
+    target_date: whenever.Date,
+    ohlc_data_frame: pd.DataFrame
+) -> float | None:
+    """
+    Retrieves the Open price of the 9:30 AM NY time candle for the given target_date.
+    """
+    if not isinstance(target_date, whenever.Date):
+        print("Error (get_nyse_open_price_for_day): target_date must be a whenever.Date.")
+        return None
+
+    target_dt = NY_ZONEINFO.convert(target_date.at(MARKET_OPEN_ET_TIME), disambiguate='raise')
+    return _get_price_at_time(target_dt, ohlc_data_frame)
+
+def get_weekly_open_price_for_week(
+    target_date: whenever.Date, # The day for which we want to find its relevant weekly open
+    ohlc_data_frame: pd.DataFrame
+) -> float | None:
+    """
+    Retrieves the Sunday 6:00 PM ET opening price for the week relevant to the target_date.
+    For any day from Monday to Sunday, the relevant weekly open is the price at 6:00 PM ET
+    on the most recent Sunday (or the current day if target_date is Sunday).
+    """
+    if not isinstance(target_date, whenever.Date):
+        print("Error (get_weekly_open_price_for_week): target_date must be a whenever.Date.")
+        return None
+
+    # Find the date of the preceding Sunday (or current day if it's Sunday).
+    # whenever.Weekday.SUNDAY has a value (e.g., 6 if Monday is 0).
+    # previous_or_same() is the most direct way.
+    sunday_date = target_date.previous_or_same(whenever.Weekday.SUNDAY)
+
+    target_dt = NY_ZONEINFO.convert(sunday_date.at(WEEKLY_OPEN_SUNDAY_TIME), disambiguate='raise')
+    return _get_price_at_time(target_dt, ohlc_data_frame)
